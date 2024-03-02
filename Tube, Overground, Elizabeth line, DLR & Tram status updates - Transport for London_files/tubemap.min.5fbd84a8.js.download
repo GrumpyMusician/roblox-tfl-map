@@ -1,0 +1,634 @@
+(function(o) {
+    "use strict";
+    tfl.logs.create("tfl.tubeMap: loaded");
+    var $statusMapContainer = $("#tubemap");
+    var $aside = $(".aside");
+    var $noDisruptionsPanel;
+    var $map;
+    var $panzoom;
+    var zoomableContent;
+    var $showPanelButton;
+    var $mapPanel;
+    var $rainbowList = $(".rainbow-list.interactive");
+    var disruptionData;
+    var stationDisruptionData;
+    var boundingBoxes = {};
+    var messageClosed = false;
+    var $stationMarkers;
+    var initialNightMode = false;
+    var isStationsTabMapLoaded = false;
+    var isLinesTabMapLoaded = false;
+    o.zoomToHideStationNames = .8;
+    var $extras = $("#station-names, #river");
+    $("#cab-cable-car").attr("class", "hidden");
+    o.turnOffDisruptions = function(selector) {
+        $("#status-map " + selector + ".disrupted").attr("class", "");
+    };
+    o.linesLoaded = function() {
+        $statusMapContainer.removeClass("loading");
+    };
+    o.ajaxLinesSuccessCallback = function(response) {
+        tfl.logs.create("tfl.tubemap: API point-to-point response returned.");
+        disruptionData = response;
+        o.loadMapIfModeChanged();
+        o.turnOffDisruptions(".line");
+        o.initDisruptions();
+    };
+    o.loadMapIfModeChanged = function() {
+        var currentMode = o.isNightMode();
+        if (initialNightMode !== currentMode) {
+            initialNightMode = currentMode;
+            tfl.logs.create("tfl.tubemap: Change of mode detected. Loading the new map...");
+            o.loadMap(currentMode);
+        }
+    };
+    o.ajaxLinesErrorCallback = function() {
+        o.turnOffDisruptions(".line");
+        o.loadingFailed();
+    };
+    o.ajaxStopPointsSuccessCallback = function(response) {
+        tfl.logs.create("tfl.tubemap: API stations response returned.");
+        stationDisruptionData = response;
+        o.initStationDisruptions();
+    };
+    o.ajaxDisruptions = function() {
+        var startDate = tfl.tools.getQueryStringParameter("startDate");
+        var endDate = tfl.tools.getQueryStringParameter("endDate");
+        var lineAjaxUrl;
+        var stopStatusAjaxUrl;
+        var modes = "tube,dlr,overground,elizabeth-line,tram";
+        var data = {
+            includeAffectedStopsAndRoutes: true
+        };
+        if (tfl.tools.AreDatesValidForAPI(startDate, endDate)) {
+            data.startDate = startDate;
+            data.endDate = endDate;
+            lineAjaxUrl = tfl.utils.stringFormat(tfl.api.LinePlannedWorks, modes, startDate, endDate);
+        } else {
+            lineAjaxUrl = tfl.utils.stringFormat(tfl.api.LineStatus, modes);
+        }
+        o.turnOffDisruptions("");
+        tfl.ajax({
+            url: lineAjaxUrl,
+            success: o.ajaxLinesSuccessCallback,
+            error: o.ajaxLinesErrorCallback,
+            autoRefreshInterval: tfl.autoRefresh.ServiceBoard,
+            autoRefreshId: "lines"
+        });
+        if (modes && modes !== "") {
+            if (tfl.tools.AreDatesValidForAPI(data.startDate, data.endDate)) {
+                stopStatusAjaxUrl = tfl.utils.stringFormat(tfl.api.StopPointsDisruptionsByModeAndTimePeriod, modes, data.startDate, data.endDate);
+            } else {
+                stopStatusAjaxUrl = tfl.utils.stringFormat(tfl.api.StopPointsDisruptionsByMode, modes);
+            }
+            tfl.ajax({
+                url: stopStatusAjaxUrl,
+                success: o.ajaxStopPointsSuccessCallback,
+                autoRefreshInterval: tfl.autoRefresh.ServiceBoard,
+                autoRefreshId: "stations"
+            });
+        }
+    };
+    o.loadingFailed = function() {
+        o.linesLoaded();
+        o.setupTubeMapMessage("Our data service is currently unavailable. We are trying to fix this. Please come back later.", false);
+    };
+    function disruptLineSection(lineId, currentStationId, prevStationId) {
+        var searches = {
+            LineWithSuffixCurrentPrevious: lineId + "_s" + currentStationId + "_" + prevStationId,
+            LineWithSuffixPreviousCurrent: lineId + "_s" + prevStationId + "_" + currentStationId,
+            LinePreviousCurrent: lineId + "_" + prevStationId + "_" + currentStationId,
+            LineCurrentPrevious: lineId + "_" + currentStationId + "_" + prevStationId,
+            LineOnly: "#" + lineId,
+            IdContainsCurrent: "[id*='" + currentStationId + "']",
+            IdContainsPrev: "[id*='" + prevStationId + "']"
+        };
+        var $lineSectionElement = $("#" + searches.LineWithSuffixCurrentPrevious);
+        if ($lineSectionElement.length === 0) {
+            tfl.logs.create("disruptLineSection: #" + searches.LineWithSuffixCurrentPrevious + " not found");
+            $lineSectionElement = $("#" + searches.LineWithSuffixPreviousCurrent);
+            if ($lineSectionElement.length === 0) {
+                tfl.logs.create("disruptLineSection: #" + searches.LineWithSuffixPreviousCurrent + " not found");
+                $lineSectionElement = $("#" + searches.LinePreviousCurrent);
+                if ($lineSectionElement.length === 0) {
+                    tfl.logs.create("disruptLineSection: #" + searches.LinePreviousCurrent + " not found");
+                    $lineSectionElement = $("#" + searches.LineCurrentPrevious);
+                    if ($lineSectionElement.length === 0) {
+                        tfl.logs.create("disruptLineSection: #" + searches.LineCurrentPrevious + " not found");
+                        $lineSectionElement = $(searches.LineOnly).find("[id*='" + searches.LineWithSuffixCurrentPrevious + "']");
+                        if ($lineSectionElement.length === 0) {
+                            tfl.logs.create("disruptLineSection: $(#" + searches.LineOnly + ").find(" + searches.LineWithSuffixCurrentPrevious + ") not found");
+                            $lineSectionElement = $(searches.LineOnly).find("[id*='" + searches.LineWithSuffixPreviousCurrent + "']");
+                            if ($lineSectionElement.length === 0) {
+                                tfl.logs.create("disruptLineSection: $(#" + searches.LineOnly + ").find(" + searches.LineWithSuffixPreviousCurrent + ") not found");
+                                $lineSectionElement = $(searches.LineOnly).find("[id*='" + searches.LinePreviousCurrent + "']");
+                                if ($lineSectionElement.length === 0) {
+                                    tfl.logs.create("disruptLineSection: $(#" + searches.LineOnly + ").find(" + searches.LinePreviousCurrent + ") not found");
+                                    $lineSectionElement = $(searches.LineOnly).find("[id*='" + searches.LineCurrentPrevious + "']");
+                                    if ($lineSectionElement.length === 0) {
+                                        tfl.logs.create("disruptLineSection: $(#" + searches.LineOnly + ").find(" + searches.LineCurrentPrevious + ") not found");
+                                        var $desperate = $(searches.IdContainsCurrent).each(function() {
+                                            tfl.logs.create("-- possible match: " + $($(this)[0]).attr("id"), "warn");
+                                        });
+                                        tfl.logs.create("disruptLineSection: failed search for " + prevStationId + " on " + lineId + " line ");
+                                        $desperate = $(searches.IdContainsPrev).each(function() {
+                                            tfl.logs.create("-- possible match: " + $($(this)[0]).attr("id"), "warn");
+                                        });
+                                        return null;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        $lineSectionElement.attr("class", "disrupted");
+        $lineSectionElement.children("line").addClass("disrupted");
+        $lineSectionElement.children("path").addClass("disrupted");
+        return $lineSectionElement.get(0);
+    }
+    function disruptStationElement($stationElement) {
+        var parents = $stationElement.parentsUntil("#interchange-circles");
+        if (parents.length === 0 || parents[parents.length - 1] === document.documentElement) {
+            $stationElement.attr("class", "disrupted");
+        } else {
+            $stationElement.attr("class", "disrupted");
+            $(parents[parents.length - 1]).attr("class", "disrupted");
+        }
+    }
+    function disruptStation(lineId, currentStationId, stopCommonName) {
+        var $interchangeElement = $stationMarkers.find("[id*=" + currentStationId + "]");
+        if ($interchangeElement.length > 0) {
+            disruptStationElement($interchangeElement);
+            return;
+        }
+        var $stationElement = $statusMapContainer.find("rect[id*=" + lineId + "_" + currentStationId + "]");
+        if ($stationElement.length > 0) {
+            disruptStationElement($stationElement);
+            return;
+        }
+        $stationElement = $statusMapContainer.find("polyline[id*=" + lineId + "_" + currentStationId + "]");
+        if ($stationElement.length > 0) {
+            disruptStationElement($stationElement);
+            return;
+        }
+    }
+    function disruptWholeLine($line, lineId) {
+        if (lineId === "london-overground") {
+            lineId = "raillo-overground";
+        }
+        $line.find("> [id*='" + lineId + "_']").attr("class", "disrupted");
+        $line.find("> [id*='" + lineId + "_']").children().attr("class", "disrupted");
+        $stationMarkers.find("[id*='" + lineId + "']").attr("class", "disrupted");
+        $stationMarkers.find("[id*='" + lineId + "']").children().attr("class", "disrupted");
+        $stationMarkers.find("[data-linestop='" + lineId + "']").attr("class", "disrupted");
+        $stationMarkers.find("[data-linestop='" + lineId + "']").children().attr("class", "disrupted");
+        return $line.get(0).getBBox();
+    }
+    o.initStationDisruptions = function() {
+        for (var i = 0; i < stationDisruptionData.length; i++) {
+            var station = stationDisruptionData[i];
+            if ((station.type.toLowerCase() === "stopblocking" || station.type.toLowerCase() === "closure") && station.stationAtcoCode) {
+                var ss = "s-" + station.stationAtcoCode.toLowerCase() + "_label";
+                var $stationLabel = $("#" + ss);
+                if ($stationLabel.length < 1) {
+                    $stationLabel = $("[id *=" + ss + "]");
+                }
+                $stationLabel.attr("class", "closed");
+                var $stationElement = $("#" + station.stationAtcoCode.toLowerCase());
+                if ($stationElement.length > 0) {
+                    $stationElement.attr("class", "disrupted closed");
+                } else {
+                    $stationElement = $stationMarkers.find("[id*=" + station.stationAtcoCode.toLowerCase() + "]");
+                    if ($stationElement.length > 0) {
+                        $stationElement.attr("class", "disrupted closed");
+                    } else {
+                        $stationElement = $("#tubemap").find("rect[id*=" + station.stationAtcoCode.toLowerCase() + "]");
+                        if ($stationElement.length > 0) {
+                            $stationElement.attr("class", "disrupted closed");
+                        }
+                    }
+                }
+            }
+        }
+        $("[data-naptan-id]").each(function() {
+            var $this = $(this);
+            var $par = $this.closest(".rainbow-list-item");
+            var naptanId = $this.data("naptan-id").toLowerCase();
+            if (naptanId && naptanId.length > 0) {
+                var stationComponents = $("#interchange-circles [id*='" + naptanId + "'], .line > rect[id*='" + naptanId + "'], .line > polyline[id*='" + naptanId + "'], .line > g[id*='" + naptanId + "']");
+                if (stationComponents.length > 0) {
+                    var bbox = {
+                        x: Number.MAX_VALUE,
+                        y: Number.MAX_VALUE,
+                        x2: Number.MIN_VALUE,
+                        y2: Number.MIN_VALUE,
+                        width: 0,
+                        height: 0
+                    };
+                    for (var i = 0; i < stationComponents.length; i++) {
+                        o.addToBoundingBox(bbox, stationComponents[i].getBBox());
+                    }
+                    tfl.logs.create("logging for naptanId|attached: %s|%s", bbox.width > 0 && bbox.height > 0 ? "yes" : "no", naptanId);
+                    if (bbox.width > 0 && bbox.height > 0) {
+                        $par.on("rainbow-list.expanded", function() {
+                            if ($(document.body).hasClass("breakpoint-Large")) {
+                                zoomableContent.zoomToBoundingBox(bbox);
+                            }
+                        });
+                        $par.on("rainbow-list.collapsed", function() {
+                            if ($(document.body).hasClass("breakpoint-Large")) {
+                                if (!zoomableContent.movedSinceZoom) {
+                                    zoomableContent.resetToInitialView();
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    };
+    function setupLine(line) {
+        var hasDisruptions = false, lineId, severity = tfl.dictionary.StatusSeverity;
+        if (line.id === "london-overground") {
+            lineId = "raillo-overground";
+        } else if (line.id === "raillo-overground") {
+            lineId = "raillo-overground";
+        } else if (line.id === "dlr") {
+            lineId = "dlr-dlr";
+        } else if (line.id === "elizabeth") {
+            lineId = "elizabeth";
+        } else if (line.id === "tram") {
+            lineId = "tram-tram";
+        } else {
+            lineId = "lul-" + line.id;
+        }
+        var bbox = {
+            x: Number.MAX_VALUE,
+            y: Number.MAX_VALUE,
+            x2: Number.MIN_VALUE,
+            y2: Number.MIN_VALUE,
+            width: 0,
+            height: 0
+        };
+        var severeDelay = line.lineStatuses.find(function(el, i, arr) {
+            if (!("disruption" in el)) return false;
+            if (el.statusSeverity === severity.SevereDelays && !el.disruption.affectedStops.length) return true;
+            return false;
+        });
+        if (severeDelay) {
+            bbox = o.addToBoundingBox(bbox, disruptWholeLine($("#" + lineId), line.id));
+            hasDisruptions = true;
+            return hasDisruptions;
+        }
+        for (var j = 0; j < line.lineStatuses.length; j++) {
+            var status = line.lineStatuses[j];
+            if (!("disruption" in status) || !("affectedRoutes" in status.disruption) || !("statusSeverityDescription" in status) || status.statusSeverityDescription.toLowerCase() === "special service" && !status.disruption.isBlocking || status.statusSeverityDescription.toLowerCase() === "minor delays") {
+                continue;
+            }
+            if ($("#" + lineId).length) {
+                if (!status.disruption.affectedRoutes.length || status.disruption.affectedRoutes.length && status.disruption.closureText && (status.disruption.closureText === "serviceClosed" || status.disruption.closureText === "suspended")) {
+                    bbox = o.addToBoundingBox(bbox, disruptWholeLine($("#" + lineId), line.id));
+                    hasDisruptions = true;
+                }
+                var wholeLineCandidate = 0;
+                for (var k = 0; k < status.disruption.affectedRoutes.length; k++) {
+                    var routeSections = status.disruption.affectedRoutes[k].routeSectionNaptanEntrySequence;
+                    if (status.disruption.isWholeLine) {
+                        wholeLineCandidate += 1;
+                        if (wholeLineCandidate === status.disruption.affectedRoutes.length - 1) {
+                            bbox = o.addToBoundingBox(bbox, disruptWholeLine($("#" + lineId), line.id));
+                            hasDisruptions = true;
+                        }
+                        continue;
+                    }
+                    var prevStationId = null;
+                    for (var l = 0; l < routeSections.length; l++) {
+                        var stopPoint = routeSections[l].stopPoint;
+                        var currentStationId = stopPoint.stationNaptan.toLowerCase();
+                        disruptStation(lineId, currentStationId, stopPoint.commonName);
+                        if (prevStationId !== null && prevStationId !== currentStationId) {
+                            var lineSegment = disruptLineSection(lineId, currentStationId, prevStationId);
+                            if (lineSegment) {
+                                hasDisruptions = true;
+                                bbox = o.addToBoundingBox(bbox, lineSegment.getBBox());
+                            }
+                        }
+                        prevStationId = currentStationId;
+                    }
+                }
+            }
+        }
+        boundingBoxes[lineId] = bbox;
+        return hasDisruptions;
+    }
+    function initTubeMapStrikeBanner() {
+        var $container = $("#tubemap .map-banner"), strikeClass = "strike-on";
+        if (isStrikeOn() && isNowTabActive()) {
+            $container.removeClass("hide");
+        }
+        $(".sliver-overlay,.view-static-map-button").on("click", function() {
+            var $fullScreenContainer = $("#fullscreen-stage");
+            return isNowTabActive() && $fullScreenContainer.length > 0 ? $fullScreenContainer.addClass(strikeClass) : $fullScreenContainer.removeClass(strikeClass);
+        });
+        o.toggleStrikeBanner = function() {
+            return $container.hasClass("hide") ? $container.removeClass("hide") : $container.addClass("hide");
+        };
+    }
+    function isNowTabActive() {
+        return $(".date-dropdown-placeholder .selected.now").length > 0;
+    }
+    function isStrikeOn() {
+        return tfl && tfl.showStrikBannerOnTubemap;
+    }
+    function isStrikeNowTabActive() {
+        return isStrikeOn() && isNowTabActive();
+    }
+    o.zoomToLineId = function(lineId) {
+        if (lineId in boundingBoxes) {
+            var bbox = boundingBoxes[lineId];
+            if (bbox.width > 0 || bbox.height > 0) {
+                zoomableContent.zoomToBoundingBox(bbox);
+            }
+        }
+    };
+    o.resetToInitialView = function() {
+        zoomableContent.resetToInitialView();
+    };
+    function getClosePanelButton() {
+        return $("<span class='icon close3-icon' tabindex='0'></span>");
+    }
+    o.closeNoDisruptionPanel = function() {
+        $noDisruptionsPanel.remove();
+        zoomableContent.enablePanZoom();
+        $statusMapContainer.removeClass("no-disruptions-on-map");
+        messageClosed = true;
+    };
+    o.setupTubeMapMessage = function(msg, canClose, hasDisruptions, hasDisruptionOverride) {
+        $(".no-disruptions-panel").remove();
+        if ((hasDisruptions || messageClosed) && canClose && !hasDisruptionOverride) {
+            return;
+        }
+        tfl.logs.create("tfl.tubemap: showing no disruptions message");
+        var future = "";
+        var message;
+        if (msg) {
+            message = msg;
+        } else if (hasDisruptionOverride && tfl.tools.getQueryStringParameter("dateTypeSelect") === null || tfl.tools.getQueryStringParameter("dateTypeSelect") === "Now") {
+            message = "The disruption map is currently unavailable";
+        } else {
+            message = "There are currently no major line disruptions reported on the network";
+            if (tfl.tools.getQueryStringParameter("startDate")) {
+                future = " future ";
+                message = "There are no closures scheduled for this period";
+            }
+        }
+        zoomableContent.disablePanZoom();
+        var $message = $("<span class='no-disruptions-panel-message'>" + message + "</span>");
+        $noDisruptionsPanel = $("<div class='no-disruptions-panel " + future + "'></div>");
+        var $closePanelButton = getClosePanelButton();
+        if (canClose) {
+            $noDisruptionsPanel.append($closePanelButton);
+            $closePanelButton.bind("click", o.closeNoDisruptionPanel);
+        }
+        $noDisruptionsPanel.append($message);
+        $statusMapContainer.append($noDisruptionsPanel).addClass("no-disruptions-on-map");
+    };
+    o.initDisruptions = function() {
+        var hasDisruptions = false;
+        var statusOverrideEnabled = false;
+        tfl.ajax({
+            url: tfl.apiUrl + "/applicationstatus/StatusUpdatesOverrideEnabled",
+            success: o.statusEnabledSuccessCallback,
+            error: o.ajaxLinesErrorCallback
+        });
+    };
+    o.statusEnabledSuccessCallback = function(response) {
+        var hasDisruptions = false;
+        var statusOverrideEnabled = response === "True" && (tfl.tools.getQueryStringParameter("dateTypeSelect") === null || tfl.tools.getQueryStringParameter("dateTypeSelect") === "Now");
+        if (!statusOverrideEnabled) {
+            for (var i = 0; i < disruptionData.length; i++) {
+                var line = disruptionData[i];
+                if (!("lineStatuses" in line)) {
+                    continue;
+                }
+                if (o.isNightMode() && line.lineStatuses[0].statusSeverityDescription.toLowerCase() === "service closed") {
+                    continue;
+                }
+                hasDisruptions = setupLine(line) || hasDisruptions;
+            }
+        }
+        o.setupTubeMapMessage(null, true, hasDisruptions, statusOverrideEnabled);
+        o.linesLoaded();
+    };
+    o.addToBoundingBox = function(bbox, bboxToAdd) {
+        bbox.x = Math.min(bbox.x, bboxToAdd.x);
+        bbox.y = Math.min(bbox.y, bboxToAdd.y);
+        bbox.x2 = Math.max(bbox.x2, bboxToAdd.x + bboxToAdd.width);
+        bbox.y2 = Math.max(bbox.y2, bboxToAdd.y + bboxToAdd.height);
+        bbox.width = bbox.x2 - bbox.x;
+        bbox.height = bbox.y2 - bbox.y;
+        return bbox;
+    };
+    o.enablePanZoom = function() {
+        tfl.logs.create("tfl.tubemap: map activated");
+        zoomableContent.enablePanZoom();
+        zoomableContent.resize();
+        zoomableContent.zoomToMinScale();
+        zoomableContent.panToCentre();
+    };
+    o.disablePanZoom = function() {
+        tfl.logs.create("tfl.tubemap: map deactivated");
+        zoomableContent.resize();
+        zoomableContent.zoomToMinScale();
+        zoomableContent.panToCentre();
+        zoomableContent.disablePanZoom();
+    };
+    o.showHideExtras = function(hide) {
+        if (hide) {
+            $extras.attr("class", "hidden");
+        } else {
+            $extras.removeAttr("class");
+        }
+    };
+    o.loadMapCallback = function(response) {
+        tfl.logs.create("tfl.tubemap: tubemap ajax loaded");
+        var disruptionClass = isStrikeNowTabActive() ? "grey-disruptions" : "coloured-disruptions";
+        $statusMapContainer.find("svg").remove("svg");
+        $statusMapContainer.prepend(response);
+        if ($(".lines-tab").hasClass("selected")) {
+            if ($aside.find(".rainbow-list-wrapper").hasClass("night-wrapper")) {
+                o.turnOnNightMode();
+            } else {
+                o.turnOffNightMode();
+            }
+        }
+        $stationMarkers = $("#interchange-circles");
+        $map = $("#status-map");
+        if (o.isStatusMap()) {
+            $map.attr("class", disruptionClass);
+            o.ajaxDisruptions();
+        } else {
+            o.linesLoaded();
+        }
+        var svgScale = o.getSvgScale();
+        tfl.logs.create("tubemap.js::loadMapCallback: svgScale " + svgScale);
+        zoomableContent = tfl.zoomableContent.init($map, {
+            isSVG: true,
+            svgScale: svgScale
+        });
+        if ($(document.body).hasClass("breakpoint-Large")) {
+            mapObject.activateMap();
+        }
+        if (o.isStatusMap()) {
+            $map.closest(".panzoom-wrapper").addClass(disruptionClass);
+        }
+    };
+    o.getSvgScale = function() {
+        var scales = [];
+        $(".line").each(function() {
+            scales.push($(this).get(0).getBoundingClientRect().height / $(this).get(0).getBBox().height);
+        });
+        var svgScale = 0;
+        var isStatusPageNowTab = tfl.tools.getQueryStringParameter("dateTypeSelect");
+        var minScale = scales.min().toFixed(3);
+        var isStationsTab = window.location.hash.toLowerCase() === "#stations-status";
+        if (!isStationsTab && o.isNightMode() && (isStatusPageNowTab === null || isStatusPageNowTab.toLowerCase() === "now")) {
+            var maxSvgScale = .423;
+            svgScale = minScale > maxSvgScale ? maxSvgScale : minScale;
+        } else {
+            svgScale = minScale;
+        }
+        return svgScale;
+    };
+    Array.prototype.min = function() {
+        return Math.min.apply(null, this);
+    };
+    Array.prototype.max = function() {
+        return Math.max.apply(null, this);
+    };
+    o.isStatusMap = function() {
+        return $statusMapContainer.data("no-disruptions") === undefined;
+    };
+    o.loadMap = function(operationalMode, overrideNightMap) {
+        if (tfl.utils.supportsSVG()) {
+            tfl.ajax({
+                url: "/Modules/TubeMap",
+                data: {
+                    nightMode: operationalMode,
+                    overrideNightMap: overrideNightMap
+                },
+                success: o.loadMapCallback,
+                dataType: "html"
+            });
+            mapObject.on("mapActivated", function() {
+                o.enablePanZoom();
+            });
+            mapObject.on("mapDeactivated", function() {
+                o.disablePanZoom();
+            });
+            if ($statusMapContainer.find(".throbber").length === 0) {
+                tfl.logs.create("tfl.tubemap: setting up Map Buttons.. the loader/throbber icon");
+                o.setupMapButtons();
+            }
+            if (o.isStatusMap() && $statusMapContainer.find("#toggle-panel-status-map").length === 0) {
+                tfl.logs.create("tfl.tubemap: setting up Map panel options");
+                o.setupMapPanel();
+                o.mapBanner();
+            }
+            initTubeMapStrikeBanner();
+        }
+    };
+    o.isNightMode = function() {
+        var $nightModeElement = $(".aside").find(".night");
+        var nightMode = false;
+        if ($nightModeElement && $nightModeElement.length) {
+            nightMode = true;
+        }
+        return nightMode;
+    };
+    o.setupMapPanelCallback = function(response) {
+        $mapPanel = $(response);
+        $statusMapContainer.append($mapPanel);
+        $mapPanel.find(".close-map-panel-button").click(o.hideMapPanel);
+        $mapPanel.find("input[name='disruption-colour']").change(function() {
+            var mapClass = $("input[name='disruption-colour']:checked").attr("id");
+            $map.attr("class", mapClass);
+            $map.closest(".panzoom-wrapper").toggleClass("coloured-disruptions grey-disruptions");
+            o.hideMapPanel();
+        });
+        tfl.forms.init();
+    };
+    o.setupMapPanel = function() {
+        $showPanelButton = $('<button title="Toggle panel" id="toggle-panel-status-map" class="map-button"><span class="icon menu-icon-blue"></span></button>');
+        $statusMapContainer.append($showPanelButton);
+        $showPanelButton.click(o.showMapPanel);
+        o.setupMapPanelCallback(hoganTemplates.schematicMapOptionsPanel.render({
+            greyDisruptions: isStrikeOn() && isNowTabActive()
+        }));
+    };
+    o.showMapPanel = function() {
+        $(document.body).addClass("showing-map-panel");
+    };
+    o.hideMapPanel = function() {
+        $(document.body).removeClass("showing-map-panel");
+    };
+    o.setupMapButtons = function() {
+        $statusMapContainer.append('<span class="throbber"></span>');
+    };
+    o.mapBanner = function() {
+        if (isStrikeOn() && isNowTabActive()) {
+            $("#tubemap").addClass("strike-on");
+            $statusMapContainer.append('<div class="map-banner hide"><strong>Strike map: </strong><span>Coloured lines are running</span></div>');
+        }
+    };
+    o.stationsTabHandler = function() {
+        o.isLinesTabMapLoaded = false;
+        if (!o.isStationsTabMapLoaded) {
+            o.isStationsTabMapLoaded = true;
+            o.loadMap(o.isNightMode(), true);
+            if ($aside.find(".rainbow-list-wrapper").hasClass("night-wrapper")) {
+                o.turnOffNightMode();
+            }
+        }
+    };
+    o.linesTabHandler = function() {
+        o.isStationsTabMapLoaded = false;
+        if (!o.isLinesTabMapLoaded) {
+            o.isLinesTabMapLoaded = true;
+            o.loadMap(o.isNightMode(), false);
+        }
+    };
+    o.turnOnNightMode = function() {
+        $statusMapContainer.addClass("night");
+    };
+    o.turnOffNightMode = function() {
+        $statusMapContainer.removeClass("night");
+    };
+    var mapObject;
+    o.init = function() {
+        tfl.logs.create("tfl.tubeMap.init: started");
+        $noDisruptionsPanel = $();
+        function setupMapObject() {
+            mapObject = tfl.maps.tubemap;
+            initialNightMode = o.isNightMode();
+            var isStationsTab = window.location.hash.toLowerCase() === "#stations-status";
+            o.loadMap(initialNightMode, isStationsTab === true);
+            if (initialNightMode && isStationsTab) {
+                o.turnOffNightMode();
+            }
+        }
+        tfl.mapInteractions.init();
+        if (tfl.maps && tfl.maps.tubemap !== undefined) {
+            setupMapObject();
+        } else {
+            $(window).one("map-object-created-tubemap", function() {
+                setupMapObject();
+            });
+        }
+        $(".stations-tab").click(o.stationsTabHandler);
+        $(".lines-tab").click(o.linesTabHandler);
+    };
+    o.init();
+})(window.tfl.tubeMap = window.tfl.tubeMap || {});

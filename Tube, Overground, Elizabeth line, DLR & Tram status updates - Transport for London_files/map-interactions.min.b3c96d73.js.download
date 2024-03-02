@@ -1,0 +1,1074 @@
+(function(o) {
+    tfl.logs.create("tfl.mapInteractions: loaded");
+    var bikePointAutoRefreshId = "MapPanelBikePoint";
+    o.nearbyMapZoomLevel = 17;
+    o.tflLinesOnly = false;
+    o.returnLines = false;
+    o.showFullscreenOnMobileLoad = false;
+    var nearbyRoutesMapZoomLevel = 12;
+    var $body = $("body");
+    var fullPanelClass = "full-panel";
+    var slideInClass = "slide-in";
+    var hiddenClass = "hidden";
+    var options = {
+        activeMapClass: "active-map",
+        mapContainerSelector: ".map-wrapper",
+        closePanelClass: "close-map-panel",
+        closePanelWrapperClass: "close-panel-wrapper",
+        mapScrollTimeMS: 500,
+        mapSelector: "#map",
+        showingPanelClass: "showing-map-panel"
+    };
+    o.init = function() {
+        tfl.logs.create("tfl.mapInteractions: init");
+        tfl.maps = tfl.maps || {};
+        $(".sliver-overlay,.view-static-map-button").off("click").on("click", function() {
+            if ($(this).hasClass("view-static-map-button")) {
+                var id = $("#full-width-content").find(".map-sliver").attr("id");
+                if (!id) {
+                    id = "schematic-map";
+                }
+                tfl.maps[id.replace("-", "")].activateMap();
+            } else {
+                $(this).siblings().each(function() {
+                    var id = $(this).attr("id");
+                    if (id !== undefined && tfl.maps[id.replace("-", "")] !== undefined) {
+                        tfl.maps[id.replace("-", "")].activateMap();
+                    }
+                });
+            }
+        });
+        tfl.logs.create("tfl.mapInteractions: initialising");
+        $(".map-sliver").each(function() {
+            var $this = $(this);
+            if (!$this.hasClass("placeholder")) {
+                if ($this.data("sliver-target") !== undefined) {
+                    $this = $this.data("sliver-target");
+                }
+                new MapObject($this);
+            }
+        });
+        tfl.logs.create("tfl.mapInteractions: initialised");
+    };
+    o.setSearchResultPin = function(selector, lat, lng) {
+        var mapObject = tfl.maps[$(selector).attr("id").replace("-", "")].googleMap;
+        var mapController = mapObject.controller;
+        mapController.addSearchResultPin({
+            lat: lat,
+            lng: lng
+        });
+        mapController.positionMap({
+            lat: lat,
+            lng: lng
+        }, o.nearbyMapZoomLevel);
+    };
+    o.setInitialSearchResultPin = function(selector, lat, lng) {
+        $(window).on("map-object-created-" + $(selector).attr("id").replace("-", ""), function() {
+            o.setSearchResultPin(selector, lat, lng);
+        });
+    };
+    function findFirstCommonAncestor(nodeA, nodeB, ancestorsB) {
+        ancestorsB = ancestorsB || getAncestors(nodeB);
+        if (ancestorsB.length === 0) return null; else if (ancestorsB.indexOf(nodeA) > -1) return nodeA; else if (nodeA == document) return null; else return findFirstCommonAncestor(nodeA.parentNode, nodeB, ancestorsB);
+    }
+    function getAncestors(node) {
+        if (node != document) return [ node ].concat(getAncestors(node.parentNode)); else return [ node ];
+    }
+    function MapObject($element, preferences) {
+        var t = this;
+        if (typeof $element === "string") {
+            t.target = $element;
+            $element = $(t.target);
+        }
+        t.$element = $element;
+        if (t.$element.data("initialised")) {
+            return false;
+        }
+        t.fullscreenZoomable = false;
+        t.settings = $.extend(options, preferences || {});
+        t.callbacks = {};
+        t.mapType = t.$element.data("map-type");
+        t.panelTarget = t.$element.data("panelTarget");
+        o.nearbyMapZoomLevel = t.$element.data("result-selected-zoom");
+        t.startDate = tfl.tools.getQueryStringParameter("startDate");
+        t.endDate = tfl.tools.getQueryStringParameter("endDate");
+        t.active = false;
+        t.id = t.$element.attr("id");
+        if (t.id !== undefined) {
+            t.concatId = t.id.replace("-", "");
+        }
+        t.$element.data("initialised", true);
+        if (t.panelTarget !== undefined) {
+            t.mapPanel = new MapPanel(t, $(t.panelTarget));
+            t.$commonParent = $(findFirstCommonAncestor(t.mapPanel.$mapPanel[0], t.$element[0]));
+        } else {
+            t.$commonParent = $(document.body);
+        }
+        if (t.mapType === "google") {
+            t.googleMap = new GoogleMap(t);
+        } else if (t.mapType === "interactive-schematic") {
+            t.setupSchematicInteractions();
+        } else if (t.target !== undefined) {
+            t.setupSchematicInteractions();
+            t.fullscreenZoomable = true;
+            if ($(document.body).hasClass("breakpoint-Large")) {
+                tfl.utils.runOnImgComplete($(t.target).get(0), function() {
+                    tfl.zoomableContent.init($(t.target));
+                });
+            } else {
+                $(window).one("enterBreakpointLarge", function() {
+                    tfl.utils.runOnImgComplete($(t.target).get(0), function() {
+                        tfl.zoomableContent.init($(t.target));
+                    });
+                });
+            }
+            t.setupZoomableInteractions();
+        }
+        t.initWindowInteractions();
+        if (t.id !== undefined) {
+            tfl.maps[t.concatId] = t;
+            $(window).trigger("map-object-created-" + t.concatId);
+            tfl.logs.create("tfl.mapInteractions: map object created - " + t.concatId);
+        }
+    }
+    MapObject.prototype.setupZoomableInteractions = function() {
+        var t = this;
+        var $targ = $(t.target);
+        $(window).on("exitBreakpointLarge", function() {
+            $targ.parent().parent().prepend($targ);
+            $targ.trigger("destroy-panzoom");
+        }).on("enterBreakpointLarge", function() {
+            $(window).one("append-around-complete", function() {
+                tfl.zoomableContent.init($targ);
+            });
+        });
+    };
+    MapObject.prototype.setupSchematicInteractions = function() {
+        var t = this;
+        $(window).on("exit-fullscreen-stage", function() {
+            if (!$body.hasClass("breakpoint-Large")) {
+                t.deactivateMap();
+            }
+        });
+        $(window).on("append-around-complete", function() {
+            if ($body.hasClass("breakpoint-Large")) {
+                t.activateMap();
+            }
+        });
+    };
+    MapObject.prototype.initWindowInteractions = function() {
+        var t = this;
+        $(window).on("enterBreakpointLarge", function() {
+            if (t.fullscreen) {
+                t.closeFullscreen(true);
+            } else {
+                t.activateMap();
+            }
+            if (t.mapType === "interactive-schematic") {
+                t.$commonParent.addClass(t.settings.activeMapClass);
+            }
+        }).on("exitBreakpointLarge", function() {
+            t.deactivateMap();
+        });
+    };
+    MapObject.prototype.activateMap = function() {
+        var t = this;
+        if (!t.active) {
+            t.active = true;
+            tfl.logs.create("tfl.mapInteractions: map activated");
+            t.$commonParent.addClass(t.settings.activeMapClass);
+            if (!$(document.body).hasClass("breakpoint-Large")) {
+                if (t.fullscreenZoomable) {
+                    tfl.fullscreen.display($(t.target), t.fullscreenZoomable);
+                } else {
+                    tfl.fullscreen.display(t.$element, t.fullscreenZoomable, t.mapType !== "interactive-schematic");
+                }
+                t.fullscreen = true;
+            }
+            if (t.googleMap !== undefined) {
+                t.googleMap.controller.activateMap();
+            }
+            t.trigger("mapActivated");
+        }
+    };
+    MapObject.prototype.deactivateMap = function() {
+        var t = this;
+        t.$commonParent.removeClass(t.settings.activeMapClass);
+        if (t.active) {
+            t.active = false;
+            tfl.logs.create("tfl.mapInteractions: map deactivated");
+            if (t.mapPanel !== undefined) {
+                t.mapPanel.hide();
+            }
+            if (t.googleMap !== undefined) {
+                t.googleMap.controller.deactivateMap();
+            }
+            t.trigger("mapDeactivated");
+        }
+    };
+    MapObject.prototype.closeFullscreen = function(remainActive) {
+        var t = this;
+        $(".map-sliver-half").removeClass("map-sliver-half");
+        if (t.fullscreen) {
+            tfl.fullscreen.hide();
+            t.fullscreen = false;
+        }
+        if (!remainActive) {
+            t.active = false;
+        }
+    };
+    MapObject.prototype.scrollToMap = function() {
+        var t = this;
+        $("html, body").animate({
+            scrollTop: t.$element.offset().top - 10
+        });
+    };
+    MapObject.prototype.on = function(event, callback) {
+        var t = this;
+        if (t.callbacks.hasOwnProperty(event)) {
+            t.callbacks[event].push(callback);
+        } else {
+            t.callbacks[event] = [ callback ];
+        }
+    };
+    MapObject.prototype.trigger = function(event, data) {
+        var t = this;
+        if (t.callbacks.hasOwnProperty(event)) {
+            var calls = t.callbacks[event];
+            for (var i = 0; i < calls.length; i += 1) {
+                calls[i](data);
+            }
+        }
+    };
+    function MapPanel(parent, $target) {
+        var t = this;
+        t.parent = parent;
+        t.$mapPanel = $target;
+        t.$infoPanel = t.$mapPanel.find(".map-panel-info");
+        t.$closeButton = t.$mapPanel.find("a.close3-icon").on("click", function(e) {
+            $(".map-sliver-half").removeClass("map-sliver-half");
+            t.hide(e);
+            return false;
+        });
+        t.$mapPanel.on("click", function() {
+            if (t.parent.fullscreen && !t.$mapPanel.hasClass("loading") && !t.$mapPanel.hasClass(fullPanelClass)) {
+                t.$mapPanel.addClass(fullPanelClass);
+            }
+        });
+    }
+    MapPanel.prototype.displayUrl = function(ajaxUrl, data, callback) {
+        var t = this;
+        tfl.stopAjaxAutoRefresh(bikePointAutoRefreshId);
+        if (ajaxUrl === undefined || data === undefined || data === null || data.naptanId === undefined && data.placeId === undefined) {
+            return false;
+        }
+        t.loadingId = data.naptanId || data.placeId;
+        t.$mapPanel.addClass("loading");
+        if (t.$mapPanel.hasClass(hiddenClass)) {
+            $(".map-sliver").addClass("map-sliver-half");
+            t.$mapPanel.removeClass(hiddenClass).addClass(slideInClass);
+        }
+        window.requestAnimationFrame = window.requestAnimationFrame || window.mozRequestAnimationFrame || window.webkitRequestAnimationFrame || window.oRequestAnimationFrame;
+        window.requestAnimationFrame(function() {
+            t.$mapPanel.removeClass(slideInClass);
+        });
+        if ($(document.body).hasClass("breakpoint-Large") && t.$mapPanel.offset().top + 100 > window.innerHeight) {
+            t.parent.scrollToMap();
+        }
+        var ajaxSuccess = function(response) {
+            if (t.loadingId === data.naptanId || t.loadingId === data.placeId) {
+                t.show($(response));
+                if (callback) callback();
+            }
+        };
+        var ajaxError = function() {
+            if (t.loadingId === data.naptanId || t.loadingId === data.placeId) {
+                t.show($("<h2>Loading information failed</h2>"));
+            }
+        };
+        tfl.ajax({
+            url: ajaxUrl,
+            data: data,
+            success: ajaxSuccess,
+            error: ajaxError,
+            dataType: "text"
+        });
+    };
+    MapPanel.prototype.show = function($el) {
+        var t = this;
+        t.$infoPanel.empty().append($el);
+        if (t.$mapPanel.hasClass(hiddenClass)) {
+            $(".map-sliver").addClass("map-sliver-half");
+            t.$mapPanel.removeClass(hiddenClass).addClass(slideInClass);
+        }
+        window.requestAnimationFrame = window.requestAnimationFrame || window.mozRequestAnimationFrame || window.webkitRequestAnimationFrame || window.oRequestAnimationFrame;
+        window.requestAnimationFrame(function() {
+            t.$mapPanel.removeClass(slideInClass);
+        });
+        if (t.$mapPanel.hasClass("loading")) {
+            t.$mapPanel.removeClass("loading");
+        }
+        if ($(document.body).hasClass("breakpoint-Large") && t.$mapPanel.offset().top + 100 > window.innerHeight) {
+            t.parent.scrollToMap();
+        }
+    };
+    MapPanel.prototype.hide = function(e) {
+        var t = this;
+        t.loadingId = null;
+        tfl.stopAjaxAutoRefresh(bikePointAutoRefreshId);
+        hidePanel(t.$mapPanel);
+        if (e) {
+            t.$mapPanel.trigger("close-mapPanel");
+            e.stopPropagation();
+        }
+    };
+    function hidePanel(mapPanel) {
+        if (mapPanel.hasClass(fullPanelClass)) {
+            mapPanel.removeClass(fullPanelClass);
+        } else {
+            mapPanel.addClass(slideInClass);
+            mapPanel.addClass(hiddenClass);
+            mapPanel.removeClass(slideInClass);
+        }
+    }
+    function showFullscreenOnMobileLoad(t) {
+        if (t.parent && t.parent.panelTarget && (t.parent.panelTarget.indexOf("ssp-map-panel") >= 0 || t.parent.panelTarget.indexOf("routes-map-panel") >= 0) || t.purpose && t.purpose.indexOf("webcat") >= 0) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+    function GoogleMap(parent) {
+        var t = this, showMapFullScreenOnMobileLoad = false;
+        t.parent = parent;
+        t.purpose = t.parent.$element.data("map-purpose");
+        t.purposeSubtype = t.parent.$element.data("map-purpose-subtype");
+        t.nearby = t.parent.$element.data("nearby");
+        o.tflLinesOnly = t.parent.$element.data("tfllinesonly") && t.parent.$element.data("tfllinesonly") === 1 ? true : false;
+        o.returnLines = t.parent.$element.data("returnlines") && t.parent.$element.data("returnlines") === 1 ? true : false;
+        showMapFullScreenOnMobileLoad = t.parent.$element.data("showmapfullscreenonmobileload") && t.parent.$element.data("showmapfullscreenonmobileload") === 1 ? true : false;
+        o.showFullscreenOnMobileLoad = showMapFullScreenOnMobileLoad || showFullscreenOnMobileLoad(t);
+        t.callbacks = {};
+        t.params = {};
+        t.initialized = false;
+        t.initializeParams();
+        t.initMap();
+    }
+    GoogleMap.prototype.initMap = function() {
+        var t = this;
+        if (t.nearby) {
+            var mapHeight = Math.max(200, window.innerHeight - 120);
+            $(document.body).append("<style>@media screen and (min-width: 900px) { #" + t.parent.id + " { height: " + mapHeight + "px; -webkit-transition: height 0.2s; -moz-transition: height 0.2s; -ms-transition: height 0.2s; transition: height 0.2s; }}</style>");
+        }
+        steal(tfl.mapScriptPath).then(function() {
+            $.fixture.on = false;
+            if (t.initialized === false) {
+                t.initialized = true;
+                t.controller = t.parent.$element["tfl_maps_" + t.purpose + "_map"](t.params).controller();
+                if (!t.controller.mapLoading || !t.controller.mapLoading.done) {
+                    return;
+                }
+                t.controller.mapLoading.done(function() {
+                    tfl.maps[t.parent.concatId] = t.parent;
+                    $(window).trigger("map-object-created-" + t.parent.concatId);
+                    tfl.logs.create("tfl.map-interactions: map object created - " + t.parent.concatId);
+                    var selectableMap = t.parent.$element.attr("data-mapselectable");
+                    if (selectableMap) {
+                        t.controller.clickMap(function(e) {
+                            t.controller.addSearchResultPin({
+                                lat: e.latLng.lat(),
+                                lng: e.latLng.lng()
+                            });
+                            t.controller.positionMap({
+                                lat: e.latLng.lat(),
+                                lng: e.latLng.lng()
+                            }, o.nearbyMapZoomLevel);
+                            t.trigger("locationSelected", {
+                                lat: e.latLng.lat(),
+                                lng: e.latLng.lng()
+                            });
+                        });
+                    }
+                });
+            }
+        });
+        var $searchFilter = $("#search-filter-form");
+        if ($searchFilter.length) {
+            var cachedDatum = null;
+            var plotDataToGraph = function(datum) {
+                var mapPanel = $(".map-panel");
+                var $next = $searchFilter.parent().next();
+                t.controller.clearSelectedPins();
+                hidePanel(mapPanel);
+                if ($next.hasClass("disambiguation-in-page") && $next.hasClass("no-results")) {
+                    $next.remove();
+                }
+                switch (datum.resultType) {
+                  case tfl.searchFilter.resultType.CurrentLocation:
+                    t.controller.showUserLocation({
+                        lat: datum.lat,
+                        lng: datum.lng
+                    });
+                    t.controller.positionMap({
+                        lat: datum.lat,
+                        lng: datum.lng
+                    }, o.nearbyMapZoomLevel);
+                    break;
+
+                  case tfl.searchFilter.resultType.Place:
+                  case tfl.searchFilter.resultType.StopPoint:
+                    t.controller.choosePlace(datum.id, datum.placeType, {
+                        lat: datum.lat,
+                        lng: datum.lng
+                    });
+                    break;
+
+                  case tfl.searchFilter.resultType.BikePoint:
+                    t.controller.positionMap({
+                        lat: datum.lat,
+                        lng: datum.lng
+                    }, o.nearbyMapZoomLevel);
+                    break;
+
+                  case tfl.searchFilter.resultType.PlaceExtra:
+                    t.controller.addSearchResultPin({
+                        lat: datum.lat,
+                        lng: datum.lng,
+                        placesExtraFullName: datum.placesExtraFullName
+                    });
+                    if (o.nearbyMapZoomLevel) t.controller.setZoom(o.nearbyMapZoomLevel);
+                    break;
+
+                  default:
+                    break;
+                }
+            };
+            $searchFilter.on("searchResultSelected", function(e, datum) {
+                cachedDatum = datum;
+                if (tfl.utils.mapViwedOnSmallDevice()) {
+                    $("#toggle-map-button").trigger("click");
+                    $(document).off("map-loaded").on("map-loaded", function() {
+                        plotDataToGraph(cachedDatum);
+                    });
+                    $(document).off("plot-points").on("plot-points", function() {
+                        plotDataToGraph(cachedDatum);
+                    });
+                } else {
+                    plotDataToGraph(cachedDatum);
+                }
+            });
+        }
+    };
+    GoogleMap.prototype.on = function(event, callback) {
+        var t = this;
+        if (t.callbacks.hasOwnProperty(event)) {
+            t.callbacks[event].push(callback);
+        } else {
+            t.callbacks[event] = [ callback ];
+        }
+    };
+    GoogleMap.prototype.trigger = function(event, data) {
+        var t = this;
+        if (t.callbacks.hasOwnProperty(event)) {
+            var calls = t.callbacks[event];
+            for (var i = 0; i < calls.length; i += 1) {
+                calls[i](data);
+            }
+        }
+    };
+    GoogleMap.prototype.initializeParams = function() {
+        var t = this;
+        if (!$body.hasClass("breakpoint-Large")) {
+            t.params.initiallyDeactivated = true;
+            t.active = false;
+            t.parent.active = false;
+        } else {
+            t.params.initiallyDeactivated = false;
+            t.active = true;
+            t.parent.active = true;
+        }
+        if (t.parent.startDate !== null && t.parent.startDate !== "") {
+            t.params.startDate = tfl.tools.makeDateFromQueryStringDate(t.parent.startDate);
+            t.params.endDate = tfl.tools.makeDateFromQueryStringDate(t.parent.endDate);
+        }
+        var $nearList = $(".nearby-list");
+        if ($nearList.length) {
+            var searchLat = $nearList.data("search-lat");
+            var searchLon = $nearList.data("search-lon");
+            if (searchLat !== null && searchLon !== null) {
+                t.params.mapCentre = {
+                    lat: searchLat,
+                    lng: searchLon
+                };
+            }
+        }
+        t.params.mapActivated = function() {
+            t.mapActivated();
+        };
+        t.params.mapDeactivated = function() {
+            t.mapDeactivated();
+        };
+        switch (t.purpose) {
+          case "road":
+            t.params.layerStateChanged = function(data) {
+                t.trigger("layerStateChanged", data);
+            };
+            t.params.disruptionChosen = function(data) {
+                t.disruptionChosen(data);
+            };
+            t.params.placeChosen = function(data) {
+                t.placeChosen(data);
+            };
+            break;
+
+          case "improvements":
+            t.params.improvementChosen = function(data) {
+                t.trigger("improvementChosen", data);
+            };
+            break;
+
+          case "nearby":
+            if (t.purposeSubtype === "routes") {
+                t.params.zoomThresholds = {
+                    displayHubsBy: 14,
+                    displayStationsBy: 14
+                };
+                t.params.initialZoom = nearbyRoutesMapZoomLevel;
+            } else {
+                t.params.initialZoom = o.nearbyMapZoomLevel;
+            }
+            break;
+
+          case "disambiguation":
+            t.params.optionsElement = $("#disambiguation-options, #" + t.parent.id.replace("-map-", "-options-"));
+            t.params.pageSize = tfl.journeyPlanner.settings.disambiguationItemsPerPage;
+            t.params.isNationalBounds = tfl.getQueryParam("NationalSearch") === "true";
+            t.params.optionChosen = function(data) {
+                t.trigger("optionChosen", data);
+            };
+            break;
+        }
+        if (t.nearby) {
+            t.params.initialZoom = o.nearbyMapZoomLevel;
+        }
+        var stationStopChosen = function(data) {
+            t.stationStopsChosen(data);
+        };
+        var placeChosen = function(data) {
+            t.placeChosen(data);
+        };
+        var layers = t.parent.$element.data("layers");
+        if (layers !== undefined) {
+            layers = layers.split(",");
+            for (var i = 0; i < layers.length; i += 1) {
+                switch (layers[i]) {
+                  case "road-corridors":
+                    break;
+
+                  case "station-stop":
+                    t.params.stationStopsChosen = stationStopChosen;
+                    break;
+
+                  case "cycle-hire":
+                  case "coach-parking":
+                  case "oyster-ticket-stop":
+                  case "car-club":
+                    t.params.placeChosen = placeChosen;
+                    break;
+
+                  default:
+                    break;
+                }
+            }
+        }
+    };
+    GoogleMap.prototype.mapActivated = function() {
+        var t = this;
+        if (!t.active) {
+            t.active = true;
+            t.parent.active = true;
+            if (!$(document.body).hasClass("breakpoint-Large")) {
+                tfl.fullscreen.display(this.parent.$element, false, true);
+                this.parent.fullscreen = true;
+                if (this.parent.mapPanel !== undefined) {
+                    tfl.fullscreen.addItemToStage(this.parent.mapPanel.$mapPanel);
+                }
+            }
+            if (this.controller.divResized) {
+                this.controller.divResized();
+                this.trigger("mapActivated");
+            }
+        }
+    };
+    GoogleMap.prototype.mapDeactivated = function() {
+        $(".map-sliver-half").removeClass("map-sliver-half");
+        var t = this;
+        if (t.active) {
+            t.active = false;
+            if (this.parent.mapPanel !== undefined) {
+                this.parent.mapPanel.hide();
+            }
+            this.parent.closeFullscreen();
+            this.trigger("mapDeactivated");
+        }
+    };
+    GoogleMap.prototype.disruptionChosen = function(data) {
+        this.trigger("disruptionChosen", data);
+    };
+    GoogleMap.prototype.taxiRankChosen = function(data) {
+        var t = this, $mapPanel = $(".map-panel"), hiddenClass = "hidden", slideInClass = "slide-in";
+        t.parent.scrollToMap();
+        $mapPanel.addClass("loading");
+        if ($mapPanel.hasClass("hidden")) {
+            $(".map-sliver").addClass("map-sliver-half");
+            $mapPanel.removeClass(hiddenClass).addClass(slideInClass);
+        }
+        $mapPanel.removeClass("loading");
+        var markup = hoganTemplates.taxiRankMapPanel.render(data);
+        $mapPanel.find(".map-panel-info").html(markup);
+        $("div.nearby-mode-details > div > br").last().remove();
+    };
+    function mapPanelContentSetupCallback() {
+        tfl.favourites.setupStopLinks();
+        var $mp = $(".map-panel");
+        $mp.find(".close3-icon").text("Close " + $mp.find(".nearby-list-heading").text());
+        if (tfl.responsiveButtonRow !== undefined) {
+            tfl.responsiveButtonRow.init();
+        }
+        if (tfl.predictions !== undefined) {
+            tfl.logs.create("tfl.stops: initialising predictions");
+            tfl.busOptions.init(".map-panel");
+            tfl.predictions.init(".map-panel");
+        }
+    }
+    GoogleMap.prototype.stationStopsChosen = function(data) {
+        var t = this;
+        var datum;
+        var mode;
+        if (data.length > 0) {
+            datum = data[0];
+            mode = "";
+            if (datum.modeNames.length == 1) {
+                mode = datum.modeNames[0];
+            } else if (datum.modeNames.length > 1) {
+                mode = tfl.modeNameMultiModal;
+            }
+            t.mode = mode;
+            t.naptanId = datum.naptanId;
+            var ajaxInput = {
+                fullContent: false,
+                mode: mode,
+                naptanId: datum.naptanId
+            };
+            t.parent.mapPanel.displayUrl("/Stops/Content", ajaxInput, function() {
+                mapPanelContentSetupCallback();
+                t.trigger("stationStopsChosen", data);
+                t.controller.divResized();
+            });
+        }
+    };
+    GoogleMap.prototype.coachChosen = function(data) {
+        var t = this;
+        if (data.hasOwnProperty("additionalProperties")) {
+            var $wrapper = $("<div></div>");
+            var $info = $('<div class="map-panel-content"></div>');
+            var contact;
+            var title;
+            var subtitle;
+            var cost;
+            for (var prop in data.additionalProperties) {
+                if (data.additionalProperties.hasOwnProperty(prop)) {
+                    var p = data.additionalProperties[prop];
+                    var key = p.key.toLowerCase();
+                    var category = p.category.toLowerCase();
+                    if (category === "address") {
+                        if (key === "address") {
+                            title = p.value;
+                        } else if (key === "contact") {
+                            contact = '<p class="contact">' + p.value + "</p>";
+                        }
+                    } else if (category === "description") {
+                        if (key === "detail") {
+                            subtitle = p.value;
+                        } else if (key === "cost") {
+                            cost = '<p class="cost">' + p.value + "</p>";
+                        } else if (key === "coachpark" || key === "noasonmap" || key === "bay") {} else {
+                            $info.append('<p class="description">' + p.value + "</p>");
+                        }
+                    }
+                }
+            }
+            if (subtitle !== undefined) {
+                $wrapper.prepend('<h4 class="map-panel-subheading coach">' + subtitle + "</h4>");
+            }
+            if (title !== undefined) {
+                $wrapper.prepend('<span class="map-panel-heading coach">' + title + "</span>");
+            }
+            if (contact !== undefined) {
+                $wrapper.append(contact);
+            }
+            if (cost !== undefined) {
+                $info.append(cost);
+            }
+            $wrapper.append($info);
+            t.parent.mapPanel.show($wrapper);
+            t.trigger("coachChosen", data);
+        }
+    };
+    GoogleMap.prototype.oysterTicketStopChosen = function(data) {
+        var t = this;
+        if (data.hasOwnProperty("additionalProperties")) {
+            var $wrapper = $("<div></div>");
+            var title = data.commonName.toTitleCase();
+            var address;
+            var postcode = " ";
+            for (var prop in data.additionalProperties) {
+                if (data.additionalProperties.hasOwnProperty(prop)) {
+                    var p = data.additionalProperties[prop];
+                    var key = p.key.toLowerCase();
+                    var category = p.category.toLowerCase();
+                    if (category === "address") {
+                        if (key === "address") {
+                            address = p.value.toTitleCase();
+                        } else if (key === "postcode") {
+                            postcode += p.value;
+                        }
+                    }
+                }
+            }
+            if (address !== undefined) {
+                $wrapper.prepend('<h4 class="map-panel-subheading oyster-ticket-stop">' + address + postcode + "</h4>");
+            }
+            if (title !== undefined) {
+                $wrapper.prepend('<span class="map-panel-heading oyster-ticket-stop">' + title + "</span>");
+            }
+            t.parent.mapPanel.show($wrapper);
+            t.trigger("oysterTicketStopChosen", data);
+        }
+    };
+    GoogleMap.prototype.carClubChosen = function(data) {
+        if (!data.hasOwnProperty("additionalProperties")) return;
+        var t = this;
+        var $wrapper = $("<div></div>");
+        var title = data.commonName.toTitleCase();
+        var postcode = "";
+        var url = "";
+        var capacity = "";
+        var operator = "";
+        for (var prop in data.additionalProperties) {
+            if (data.additionalProperties.hasOwnProperty(prop)) {
+                var p = data.additionalProperties[prop];
+                if (p.value === "") {
+                    continue;
+                }
+                var key = p.key.toLowerCase();
+                var category = p.category.toLowerCase();
+                if (category === "address") {
+                    if (key === "postcode") {
+                        postcode = p.value;
+                    }
+                } else if (category === "description") {
+                    if (key === "location_url") {
+                        url = p.value;
+                    } else if (key === "operator") {
+                        operator = p.value;
+                    } else if (key === "vehicle_count") {
+                        capacity = p.value;
+                    }
+                }
+            }
+        }
+        data = {
+            title: title,
+            postcode: postcode,
+            url: url,
+            capacity: capacity,
+            operator: operator
+        };
+        if (data.operator !== "" || data.capacity !== "") {
+            var operatorHtml = "";
+            var capacityHtml = "";
+            if (data.operator !== "") {
+                operatorHtml = '<span class="spaces">Provider: ' + data.operator + "</span>";
+            }
+            if (data.capacity !== "") {
+                capacityHtml = "<span>Capacity: " + data.capacity + " spaces</span>";
+            }
+            $wrapper.prepend('<div class="clearfix"></div><p class="availability">' + capacityHtml + operatorHtml + "</p>");
+        }
+        if (data.url !== "" || data.postcode !== "") {
+            var urlHtml = "";
+            var postcodeHtml = "";
+            if (data.url !== "") {
+                urlHtml = '<div class="rbr-button"><a class="plain-button" href="' + data.url + '">Visit the ' + data.operator + " website</a></div>";
+            }
+            if (data.postcode !== "") {
+                postcodeHtml = '<div class="rbr-button"><a class="plain-link dark with-icon" href="' + tfl.jPLandingPageUrl + "?to=" + encodeURIComponent(data.postcode) + '"><span class="i secondary-journey-to-icon"></span><span class="not-opened">Journey </span>to here</a></div>';
+            }
+            $wrapper.prepend('<div class="inline-button-container"><div class="rbr-group"><div class="rbr-button rbr-group-button">' + postcodeHtml + urlHtml + "</div></div>");
+        }
+        if (data.title !== undefined && data.title !== "") {
+            $wrapper.prepend('<div class="nearby-mode-details"><span class="map-panel-heading car-clubs">' + data.title + "</span></div>");
+        }
+        t.parent.mapPanel.show($wrapper);
+        if (tfl.responsiveButtonRow !== undefined) {
+            tfl.responsiveButtonRow.init();
+        }
+        t.trigger("carClubChosen", data);
+    };
+    GoogleMap.prototype.loadFromList = function(id, mode) {
+        var t = this;
+        t.naptanId = id;
+        var ajaxInput = {
+            fullContent: false,
+            mode: mode,
+            naptanId: id
+        };
+        var data = [ {
+            modeNames: [ mode ],
+            naptanId: id
+        } ];
+        t.parent.mapPanel.displayUrl("/Stops/Content", ajaxInput, function() {
+            mapPanelContentSetupCallback();
+            t.trigger("stationStopsChosen", data);
+            var mapPanel = $(".map-panel"), $nearbyList = $(".nearby-list"), nextLink, firstLink, originatorLink, originator = $nearbyList.find("li").filter(function(i, el) {
+                return $(this).data("id") == id;
+            });
+            hasShowMore = originator.find(".expandable-information");
+            $nearbyList.find(".expanded-result-details > a:first-child").removeData("jumpto");
+            if ($(".nearby-list li:visible:last").data("id") == id) {
+                if ($(".pagination-controls").length) {
+                    if (!hasShowMore.length) {
+                        nextLink = $(".pagination-controls").find("a.first_link");
+                    } else {
+                        nextLink = hasShowMore.find("a.show-more");
+                    }
+                } else {
+                    nextLink = $("ul.footer-links > li:first a");
+                }
+            } else {
+                if (hasShowMore.length) {
+                    nextLink = hasShowMore.find("a.show-more");
+                } else {
+                    nextLink = originator.next().find("a:first");
+                }
+            }
+            firstLink = mapPanel.find("a:first");
+            originatorLink = originator.find(".expanded-result-details > a:first");
+            originatorLink.data("jumpto", firstLink);
+            firstLink.data("jumpback", originatorLink);
+            mapPanel.find("a:last").data("jumpto", nextLink);
+            $(".map-panel").find("a.close3-icon").on("click.removeTabs", function() {
+                $nearbyList.find(".expanded-result-details > a:first-child").removeData("jumpto");
+            });
+        });
+    };
+    o.updateBikePoint = function(data, renderCallback) {
+        if (data === null || renderCallback === null) {
+            return;
+        }
+        var bikePoint = data;
+        var numBikes = 0, numSpaces = 0, numDocks;
+        for (var j = 0; j < bikePoint.additionalProperties.length; j++) {
+            var property = bikePoint.additionalProperties[j];
+            if (property.key == "NbBikes") {
+                numBikes = parseInt(property.value);
+            } else if (property.key == "NbEmptyDocks") {
+                numSpaces = parseInt(property.value);
+            }
+        }
+        numDocks = numBikes + numSpaces;
+        var cssDockBarRatio = Math.round(numBikes / numDocks * 1e3 / 125) * 125;
+        if (cssDockBarRatio === 0 && numBikes > 0) {
+            cssDockBarRatio = "125";
+        } else if (cssDockBarRatio === 1e3 && numSpaces > 0) {
+            cssDockBarRatio = "875";
+        } else if (cssDockBarRatio === 0) {
+            cssDockBarRatio = "000";
+        }
+        cssDockBarRatio = "full-" + cssDockBarRatio;
+        var numBikesMessage, numSpacesMessage;
+        if (numBikes === 1) {
+            numBikesMessage = "1 bike available";
+        } else {
+            numBikesMessage = numBikes + " bikes available";
+        }
+        if (numSpaces === 1) {
+            numSpacesMessage = "1 space";
+        } else {
+            numSpacesMessage = numSpaces + " spaces";
+        }
+        renderCallback(bikePoint.id, cssDockBarRatio, numBikes, numBikesMessage, numSpaces, numSpacesMessage);
+    };
+    function updateBikePointInMapPanel(bikePointId, cssDockBarRatio, numBikes, numBikesMessage, numSpaces, numSpacesMessage) {
+        var $mapPanel = $(".map-panel-info");
+        var $dockBar = $mapPanel.find(".cycle-hire-block");
+        var $docks = $dockBar.find(".docks");
+        var dockBarFull = "<div class='dock full'></div>";
+        var dockBarEmpty = "<div class='dock'></div>";
+        $docks.hide();
+        if (numBikes + numSpaces > 80) {
+            $docks.addClass("borderless");
+        }
+        $docks.empty();
+        for (var i = 0; i < numBikes; i++) {
+            $docks.append(dockBarFull);
+        }
+        for (i = 0; i < numSpaces; i++) {
+            $docks.append(dockBarEmpty);
+        }
+        $docks.show();
+        var $dockIcon = $mapPanel.find(".bch-docking-station-icon");
+        var oldClass = $dockIcon.attr("class");
+        oldClass = oldClass.substring(oldClass.indexOf("full-"));
+        var spaceIdx = oldClass.indexOf(" ");
+        if (spaceIdx >= 0) {
+            oldClass = oldClass.substring(0, spaceIdx);
+        }
+        $dockIcon.removeClass(oldClass).addClass(cssDockBarRatio);
+        $dockBar.find(".bikes").text(numBikesMessage);
+        $dockBar.find(".spaces").text(numSpacesMessage);
+    }
+    GoogleMap.prototype.bikeChosen = function(data) {
+        var ajaxInput = {
+            placeId: data.id
+        };
+        this.parent.mapPanel.displayUrl("/Nearby/BikePoint", ajaxInput, function() {
+            tfl.ajax({
+                url: tfl.utils.stringFormat(tfl.api.BikePointId, data.id),
+                success: function(response) {
+                    if (this.controller) {
+                        this.controller.updateBikePoints([ response ]);
+                    }
+                    o.updateBikePoint(response, updateBikePointInMapPanel);
+                },
+                autoRefreshInterval: tfl.autoRefresh.BikePoint,
+                autoRefreshId: bikePointAutoRefreshId
+            });
+        });
+    };
+    GoogleMap.prototype.triggerEventWithData = function(event) {
+        return function(data) {
+            this.trigger(event, data);
+        };
+    };
+    var GM = GoogleMap.prototype;
+    GoogleMap.prototype.placeChosenAction = {
+        BikePoint: GM.bikeChosen,
+        CoachBay: GM.coachChosen,
+        CoachPark: GM.coachChosen,
+        OtherCoachParking: GM.coachChosen,
+        OnStreetMeteredBay: GM.coachChosen,
+        OysterTicketShop: GM.oysterTicketStopChosen,
+        CarClub: GM.carClubChosen,
+        JamCam: GM.triggerEventWithData("jamCamChosen"),
+        VariableMessageSign: GM.triggerEventWithData("variableMessageSignChosen"),
+        TaxiRank: GM.taxiRankChosen
+    };
+    GoogleMap.prototype.placeChosen = function(data) {
+        var placeType = data.placeType;
+        if (!(placeType in GoogleMap.prototype.placeChosenAction)) return;
+        this.placeChosenAction[placeType].call(this, data);
+    };
+    o.mapUtils = function mapUtils(o) {
+        var $mapContainer = $(".map-sliver-container");
+        var $mobileMap = function() {
+            return $mapContainer.find(".map-collapsed-overlay");
+        };
+        var $desktopMap = function() {
+            return $mapContainer.find(".map-container");
+        };
+        var $mapViewButton = $(".map-view-button");
+        var mapViewTypes = {
+            mobile: 1,
+            desktop: 2
+        };
+        var mobileMapReady = null;
+        o.$mobileMapReadyEvent = $.Event("mobileMapReady");
+        o.$mobileMapDeactivatedEvent = $.Event("mobileMapDeactivated");
+        o.toggleMapView = function toggleMapView(e) {
+            var ct = e.currentTarget;
+            e.stopPropagation();
+            if (setMapViewOrHideMapText(ct)) {
+                tfl.mapTrack.trackOpenMapView();
+            }
+            showHideMap(ct, e.info);
+        };
+        o.mobileMapCollapsedOverlayReady = function mobileMapCollapsedOverlayReady(e) {
+            if (o.showFullscreenOnMobileLoad) {
+                $mobileMap().trigger({
+                    type: "click",
+                    info: {
+                        mobileMapReady: true
+                    }
+                });
+            }
+            o.showFullscreenOnMobileLoad = true;
+        };
+        o.mobileMapCollapsedOverlayDeactivated = function mobileMapCollapsedOverlayDeactivated(e) {
+            $mapViewButton.trigger({
+                type: "click",
+                info: {
+                    mobileMapDeactivated: true
+                }
+            });
+        };
+        function setMapViewOrHideMapText(ct) {
+            var toggleButton = $(ct).find(".map-view-text");
+            var currentMapButtonText = toggleButton.text().trim();
+            if (currentMapButtonText === toggleButton.data("text-swap")) {
+                toggleButton.text(toggleButton.data("text-original"));
+            } else {
+                toggleButton.text(toggleButton.data("text-swap"));
+            }
+            return currentMapButtonText === toggleButton.data("text-original");
+        }
+        function showHideMap(e, data) {
+            var context = $(e).data("map-panel");
+            $mapContainer.parent().toggleClass("hidden");
+            map = getMap();
+            if (map.$mapObject.length && map.type === mapViewTypes.mobile && (!data || !data.mobileMapDeactivated)) {
+                $mobileMap().trigger({
+                    type: "click",
+                    info: {
+                        mobileMapReady: true
+                    }
+                });
+            }
+            if (!map.$mapObject.length) {
+                tfl.stops.init();
+                switch (context) {
+                  case "ssp":
+                    tfl.busOptions.init(".station-details");
+                    tfl.predictions.init(".station-details");
+                    break;
+
+                  default:
+                    break;
+                }
+            }
+        }
+        function getMap() {
+            var viewPort = tfl.utils.getViewPort();
+            var map = {
+                $mapObject: null,
+                type: null,
+                length: 0
+            };
+            if (viewPort === tfl.utils.viewPorts.large) {
+                map.$mapObject = $desktopMap();
+                map.type = mapViewTypes.desktop;
+            } else if (viewPort === tfl.utils.viewPorts.medium || viewPort === tfl.utils.viewPorts.small) {
+                map.$mapObject = $mobileMap();
+                map.type = mapViewTypes.mobile;
+            }
+            map.length = map.$mapObject.length;
+            return map;
+        }
+        $mapViewButton.on({
+            click: o.toggleMapView,
+            mobileMapReady: o.mobileMapCollapsedOverlayReady,
+            mobileMapDeactivated: o.mobileMapCollapsedOverlayDeactivated
+        });
+    }(o);
+})(window.tfl.mapInteractions = window.tfl.mapInteractions || {});
