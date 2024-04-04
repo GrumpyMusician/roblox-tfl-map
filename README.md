@@ -6,5 +6,3 @@ https://grumpymusician.github.io/roblox-tfl-map/
 
 # HAM/COL's map
 https://grumpymusician.github.io/roblox-tfl-map/hamcol.html
-
-problem: fenchurch street does not exist
